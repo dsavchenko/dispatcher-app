@@ -87,8 +87,9 @@ class QueryOutput(object):
     def dump_analysis_parameters(self,work_dir,query_dict):
         file_path=FilePath(file_dir=work_dir, file_name='analysis_parameters.json')
         with open(file_path.path, 'w')  as outfile:
-            my_json_str = json.dumps(query_dict, indent=4)
-            outfile.write(u'%s' % my_json_str)
+            _dict = {k: v for k, v in query_dict.items() if v is not None}
+            my_json_str = json.dumps(_dict, indent=4, sort_keys=True)
+            outfile.write(u'%s' % my_json_str) # why is this formatting necessary?
 
     def set_products(self, keys, values):
         for k, v in zip(keys, values):

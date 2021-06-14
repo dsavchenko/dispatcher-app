@@ -4,6 +4,8 @@ from json import JSONDecodeError
 import yaml
 
 import cdci_data_analysis.flask_app.app
+from cdci_data_analysis.flask_app.dispatcher_query import InstrumentQueryBackEnd
+from cdci_data_analysis.analysis.hash import make_hash
 
 import re
 import json
@@ -330,7 +332,7 @@ def dispatcher_test_conf_fn(tmpdir):
         f.write("""
 dispatcher:
     dummy_cache: dummy-cache
-    products_url: http://www.astro.unige.ch/cdci/astrooda_
+    products_url: PRODUCTS_URL
     dispatcher_callback_url_base: http://localhost:8001
     sentry_url: "https://2ba7e5918358439485632251fa73658c@sentry.io/1467382"
     logstash_host: 
@@ -357,20 +359,6 @@ dispatcher:
 @pytest.fixture
 def dispatcher_test_conf(dispatcher_test_conf_fn):
     yield yaml.load(open(dispatcher_test_conf_fn))['dispatcher']
-
-
-def make_hash(o):
-    def format_hash(x): return hashlib.md5(
-        json.dumps(sorted(x)).encode()
-    ).hexdigest()[:16]
-
-    if isinstance(o, (set, tuple, list)):
-        return format_hash(tuple(map(make_hash, o)))
-
-    elif isinstance(o, (dict, OrderedDict)):
-        return make_hash(tuple(o.items()))
-
-    return format_hash(json.dumps(o))
 
 
 def start_dispatcher(rootdir, test_conf_fn):
@@ -476,8 +464,9 @@ def dispatcher_long_living_fixture(pytestconfig, dispatcher_test_conf_fn, dispat
 
 @pytest.fixture
 def empty_products_files_fixture(default_params_dict):
+    #TODO: avoid copypaste in empty_products_user_files_fixture
     # generate job_id
-    job_id = u'%s' % (make_hash(default_params_dict))
+    job_id = make_hash(InstrumentQueryBackEnd.restricted_par_dic(default_params_dict))
     # generate random session_id
     session_id = u''.join(random.choice(string.ascii_uppercase + string.digits) for _ in range(16))
     scratch_params = dict(
@@ -504,8 +493,15 @@ def empty_products_files_fixture(default_params_dict):
 @pytest.fixture
 def empty_products_user_files_fixture(default_params_dict, default_token_payload):
     sub = default_token_payload['sub']
-    # generate job_id related to a certain user
-    job_id = u'%s' % (make_hash({**default_params_dict, "sub": sub}))
+    
+    # generate job_id related to a certain user    
+    job_id = make_hash(
+            {
+                **InstrumentQueryBackEnd.restricted_par_dic(default_params_dict),
+                 "sub": sub
+            }
+        )
+
     # generate random session_id
     session_id = u''.join(random.choice(string.ascii_uppercase + string.digits) for _ in range(16))
     scratch_params = dict(
@@ -514,6 +510,7 @@ def empty_products_user_files_fixture(default_params_dict, default_token_payload
     )
     DispatcherJobState.remove_scratch_folders(job_id=job_id)
     DispatcherJobState.remove_download_folders()
+    
     scratch_dir_path = f'scratch_sid_{session_id}_jid_{job_id}'
     # set the scratch directory
     os.makedirs(scratch_dir_path)
@@ -666,7 +663,7 @@ class DispatcherJobState:
         return job_monitor_json_fn
 
     @property
-    def email_history_folder(self):
+    def email_history_folder(self) -> str:
         return f'{self.scratch_dir}/email_history'
 
     def assert_email(self, state, number=1, comment=""):
@@ -675,3 +672,6 @@ class DispatcherJobState:
 
     def load_job_state_record(self, state, message):
         return json.load(open(f'{self.scratch_dir}/job_monitor_{state}_{message}_.json'))
+
+    def load_emails(self):
+        return [ open(fn).read() for fn in glob.glob(f"{self.email_history_folder}/*") ]

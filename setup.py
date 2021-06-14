@@ -42,7 +42,9 @@ install_req = [
     "celery",
     "redis",
     "pyjwt",
-    "marshmallow"
+    "marshmallow",
+    "black",
+    "bs4"
 ]
 
 test_req = [

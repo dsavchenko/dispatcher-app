@@ -1,4 +1,5 @@
 import shutil
+from urllib import parse
 
 import pytest
 import requests
@@ -13,6 +14,7 @@ from urllib.parse import urlencode
 import glob
 
 from cdci_data_analysis.pytest_fixtures import DispatcherJobState, make_hash
+from cdci_data_analysis.analysis.email_helper import textify_email
 
 from flask import Markup
 
@@ -100,12 +102,15 @@ generalized_email_patterns = {
     ],
     'products_url': [
         '(href=")(.*?)(">url)',
+    ],
+    'job_id': [
+        '(job_id: )(.*?)(<)'
     ]
 }
 
 ignore_email_patterns = [
     '\( .*?ago \)',
-    '"token": ".*?"',
+    '&#34;token&#34;:.*?,',
     'expire in .*? .*?\.'
 ]
 
@@ -135,7 +140,7 @@ def adapt_html(html, **email_args):
 # ignore patterns which we are too lazy to substiture
 def ignore_html_patterns(html):
     for pattern in ignore_email_patterns:
-        html = re.sub(pattern, "<IGNORES>", html)
+        html = re.sub(pattern, "<IGNORES>", html, flags=re.DOTALL)
 
     return html
 
@@ -150,6 +155,52 @@ def store_email(email_html, **email_args):
 
     return fn
 
+def extract_api_code(text):
+    r = re.search('<div.*?>(.*?)</div>', text, flags=re.DOTALL)
+    if r:
+        return textify_email(r.group(1))
+    else:
+        with open("no-api-code-problem.html", "w") as f:
+            f.write(text)
+        raise RuntimeError
+
+def extract_products_url(text):
+    r = re.search('<a href="(.*?)">url</a>', text, flags=re.DOTALL)
+    if r:
+        return r.group(1)
+    else:
+        with open("no-url-problem.html", "w") as f:
+            f.write(text)
+        raise RuntimeError
+
+
+def validate_api_code(api_code, dispatcher_live_fixture):
+    if dispatcher_live_fixture is not None:
+        api_code = api_code.replace("<br>", "")
+        api_code = api_code.replace("PRODUCTS_URL/dispatch-data", dispatcher_live_fixture)
+
+        my_globals = {}
+        exec(api_code, my_globals)
+
+        assert my_globals['data_collection']
+        
+        my_globals['data_collection'].show()
+
+def validate_products_url(url, dispatcher_live_fixture):
+    if dispatcher_live_fixture is not None:
+        # this is URL to frontend; it's not really true that it is passed the same way to dispatcher in all cases
+        # in particular, catalog seems to be passed differently!
+        url = url.replace("PRODUCTS_URL", dispatcher_live_fixture + "/run_analysis")
+
+        r = requests.get(url)
+
+        assert r.status_code == 200
+
+        jdata = r.json()
+
+        assert jdata['exit_status']['status'] == 0
+        assert jdata['exit_status']['job_status'] == 'done'
+        
     
 def validate_email_content(
                    message_record, 
@@ -157,9 +208,10 @@ def validate_email_content(
                    dispatcher_job_state: DispatcherJobState,
                    time_request_str: str=None,
                    products_url=None,
+                   dispatcher_live_fixture=None
                    ):
 
-    reference_email = get_reference_email(state=state, time_request_str=time_request_str, products_url=products_url)
+    reference_email = get_reference_email(state=state, time_request_str=time_request_str, products_url=products_url, job_id=dispatcher_job_state.job_id[:8])
     
     assert message_record['mail_from'] == 'team@odahub.io'
     assert message_record['rcpt_tos'] == ['mtm@mtmco.net', 'team@odahub.io']
@@ -192,13 +244,28 @@ def validate_email_content(
                 open("adapted_reference.html", "w").write(ignore_html_patterns(reference_email))
                 assert ignore_html_patterns(reference_email) == ignore_html_patterns(content_text_html), f"please inspect {fn} and possibly copy it to {fn.replace('to_review', 'reference')}"
 
+            validate_api_code(
+                extract_api_code(content_text_html),
+                dispatcher_live_fixture
+            )
+
+            validate_products_url(
+                extract_products_url(content_text_html),
+                dispatcher_live_fixture
+            )
 
         if content_text is not None:
             assert re.search(f'Dear User', content_text, re.IGNORECASE)
             assert re.search(f'Kind Regards', content_text, re.IGNORECASE)
 
+            with open("email.text", "w") as f:
+                f.write(content_text)
+
             if products_url is not None:                
                 assert products_url in content_text
+
+
+
 
 
 def get_expected_products_url(dict_param):
@@ -215,11 +282,12 @@ def get_expected_products_url(dict_param):
         if value is None:
             dict_param_complete.pop(key)
 
-    return '%s?%s' % ('http://www.astro.unige.ch/cdci/astrooda_', urlencode(dict_param_complete))
+    return '%s?%s' % ('PRODUCTS_URL', urlencode(dict_param_complete))
 
 
 def test_validation_job_id(dispatcher_live_fixture):
     server = dispatcher_live_fixture
+    DispatcherJobState.remove_scratch_folders()
 
     logger.info("constructed server: %s", server)
 
@@ -229,57 +297,56 @@ def test_validation_job_id(dispatcher_live_fixture):
     }
     encoded_token = jwt.encode(token_payload, secret_key, algorithm='HS256')
 
-    dict_param = dict(
-        query_status="new",
-        query_type="Real",
+    # these parameters define request content
+    base_dict_param = dict(
         instrument="empty-async",
         product_type="dummy",
-        token=encoded_token
+        query_type="real",
+    )
+
+    dict_param = dict(
+        query_status="new",
+        token=encoded_token,
+        **base_dict_param
     )
 
     # this should return status submitted, so email sent
     c = requests.get(server + "/run_analysis",
                      dict_param
                      )
+
+    print(json.dumps(c.json(), sort_keys=True, indent=4))
+
     assert c.status_code == 200
     dispatcher_job_state = DispatcherJobState.from_run_analysis_response(c)
     jdata = c.json()
     assert jdata['exit_status']['job_status'] == 'submitted'
 
     # let's generate another valid token, just for a different user
-    token_payload = {
-        **default_token_payload,
-        "sub":"mtm1@mtmco.net"
-    }
-    encoded_token = jwt.encode(token_payload, secret_key, algorithm='HS256')
-
-    dict_param = dict(
-        query_status="ready",
-        query_type="Real",
-        instrument="empty-async",
-        product_type="dummy",
-        job_id=dispatcher_job_state.job_id,
-        session_id=dispatcher_job_state.session_id,
-        token=encoded_token
-    )
-
-
-    # this should return status submitted, so email sent
+    token_payload['sub'] = "mtm1@mtmco.net"
+        
+    # this should return status submitted, so email sent    
+    dict_param['token'] = jwt.encode(token_payload, secret_key, algorithm='HS256')
+    dict_param['job_id'] = dispatcher_job_state.job_id # this is job id from different user
+    dict_param['query_status'] = 'submitted'
+    
     c = requests.get(server + "/run_analysis",
                      dict_param
                      )
-    dict_param.pop('token')
-    dict_param.pop('session_id')
-    dict_param.pop('job_id')
-    dict_param['query_status'] = 'new'
-    wrong_job_id = u'%s' % (make_hash({**dict_param, "sub": "mtm1@mtmco.net"}))
-    assert c.status_code == 403
+    
+    wrong_job_id = make_hash({**base_dict_param, "sub": "mtm1@mtmco.net"})
+
+    from cdci_data_analysis.flask_app.dispatcher_query import InstrumentQueryBackEnd
+    assert InstrumentQueryBackEnd.restricted_par_dic(dict_param) == base_dict_param
+
+    assert c.status_code == 403, json.dumps(c.json(), indent=4, sort_keys=True)
     jdata = c.json()
+    
     assert jdata["exit_status"]["debug_message"] == \
            f'The provided job_id={dispatcher_job_state.job_id} does not match with the ' \
-           f'job_id={wrong_job_id} derived from the request parameters for your user account email'
+           f'job_id={wrong_job_id} derived from the request parameters for your user account email; parameters are derived from this request'
     assert jdata["exit_status"]["error_message"] == ""
-    assert jdata["exit_status"]["message"] == "user not authorized to download the requested product"
+    assert jdata["exit_status"]["message"] == "Request not authorized"
 
 
 @pytest.mark.parametrize("default_values", [True, False])
@@ -288,14 +355,13 @@ def test_validation_job_id(dispatcher_live_fixture):
 #@pytest.mark.parametrize("time_original_request_none", [True, False])
 @pytest.mark.parametrize("request_cred", ['public', 'private'])
 def test_email_run_analysis_callback(dispatcher_long_living_fixture, dispatcher_local_mail_server, default_values, request_cred, time_original_request_none):
+    from cdci_data_analysis.plugins.dummy_instrument.data_server_dispatcher import DataServerQuery
+    DataServerQuery.set_status('submitted')
+
     server = dispatcher_long_living_fixture
     
     DispatcherJobState.remove_scratch_folders()
-
-    # remove all the current scratch folders
-    dir_list = glob.glob('scratch_*')
-    [shutil.rmtree(d) for d in dir_list]
-
+    
     token_none = ( request_cred == 'public' )
         
     
@@ -354,6 +420,7 @@ def test_email_run_analysis_callback(dispatcher_long_living_fixture, dispatcher_
             dispatcher_job_state,
             time_request_str=time_request_str,
             products_url=products_url,
+            dispatcher_live_fixture=None,
         )
         
     # for the call_back(s) in case the time of the original request is not provided
@@ -387,6 +454,9 @@ def test_email_run_analysis_callback(dispatcher_long_living_fixture, dispatcher_
                          token=encoded_token,
                          time_original_request=time_request
                      ))
+
+
+    DataServerQuery.set_status('done')
 
     # this triggers email
     c = requests.get(server + "/call_back",
@@ -422,11 +492,11 @@ def test_email_run_analysis_callback(dispatcher_long_living_fixture, dispatcher_
         
         # check the email in the log files
         validate_email_content(
-            dispatcher_local_mail_server.get_email_record(0),
-            'submitted',
-            #'done',
+            dispatcher_local_mail_server.get_email_record(1),
+            'done',
             dispatcher_job_state,
             time_request_str=time_request_str,
+            dispatcher_live_fixture=server,
         )
         
     # this also triggers email (simulate a failed request)
@@ -465,6 +535,7 @@ def test_email_run_analysis_callback(dispatcher_long_living_fixture, dispatcher_
             'failed',
             dispatcher_job_state,
             time_request_str=time_request_str,
+            dispatcher_live_fixture=server,
         )
 
     # TODO this will rewrite the value of the time_request in the query output, but it shouldn't be a problem?
@@ -486,6 +557,9 @@ def test_email_run_analysis_callback(dispatcher_long_living_fixture, dispatcher_
     assert c.status_code == 200
 
     # TODO: test that this returns the result
+
+    DataServerQuery.set_status('submitted') # sets the expected default for other tests
+
 
 
 @pytest.mark.not_safe_parallel
@@ -521,6 +595,8 @@ def test_email_submitted_same_job(dispatcher_live_fixture, dispatcher_local_mail
     c = requests.get(server + "/run_analysis",
                      dict_param
                      )
+
+    assert c.status_code == 200
     
     dispatcher_job_state = DispatcherJobState.from_run_analysis_response(c)
     
@@ -528,7 +604,6 @@ def test_email_submitted_same_job(dispatcher_live_fixture, dispatcher_local_mail
     #dict_param_complete.pop("token")
 
 
-    assert c.status_code == 200
     jdata = c.json()
     assert jdata['exit_status']['job_status'] == 'submitted'
     assert jdata['exit_status']['email_status'] == 'email sent'
@@ -602,6 +677,77 @@ def test_email_submitted_same_job(dispatcher_live_fixture, dispatcher_local_mail
 
 
 @pytest.mark.not_safe_parallel
+def test_email_unnecessary_job_id(dispatcher_live_fixture, dispatcher_local_mail_server):
+    # remove all the current scratch folders
+    DispatcherJobState.remove_scratch_folders()
+
+    server = dispatcher_live_fixture
+
+    dict_param = dict(
+        query_status="new",
+        query_type="Real",
+        instrument="empty-async",
+        product_type="dummy",
+        job_id="something-else"
+    )
+
+    # this should return status submitted, so email sent
+    c = requests.get(server + "/run_analysis",
+                     dict_param
+                     )
+
+    assert c.status_code == 400
+        
+    jdata = c.json()
+    assert 'unnecessarily' in jdata['error'] 
+    assert dict_param['job_id'] in jdata['error'] 
+    
+
+   
+@pytest.mark.not_safe_parallel
+def test_email_submitted_frontend_like_job_id(dispatcher_live_fixture, dispatcher_local_mail_server):
+    DispatcherJobState.remove_scratch_folders()
+
+    server = dispatcher_live_fixture
+    logger.info("constructed server: %s", server)
+
+    # email content in plain text and html format
+    smtp_server_log = dispatcher_local_mail_server.local_smtp_output_json_fn
+
+    encoded_token = jwt.encode(default_token_payload, secret_key, algorithm='HS256')
+
+    dict_param = dict(
+        query_status="new",
+        query_type="Real",
+        instrument="empty-async",
+        product_type="dummy",
+        token=encoded_token,
+        job_id=""
+    )
+
+    # this should return status submitted, so email sent
+    c = requests.get(server + "/run_analysis",
+                     dict_param
+                     )
+
+    assert c.status_code == 200
+    
+    dispatcher_job_state = DispatcherJobState.from_run_analysis_response(c)
+    
+    
+    jdata = c.json()
+    assert jdata['exit_status']['job_status'] == 'submitted'
+    assert jdata['exit_status']['email_status'] == 'email sent'
+
+    # check the email in the email folders, and that the first one was produced
+    
+    dispatcher_job_state.assert_email(state="submitted")
+    dispatcher_local_mail_server.assert_email_number(1)
+    
+  
+
+
+@pytest.mark.not_safe_parallel
 def test_email_submitted_multiple_requests(dispatcher_live_fixture, dispatcher_local_mail_server):
     # remove all the current scratch folders
     dir_list = glob.glob('scratch_*')
@@ -670,7 +816,7 @@ def test_email_submitted_multiple_requests(dispatcher_live_fixture, dispatcher_l
     dispatcher_job_state.assert_email('submitted')
     
 
-    # let the interval time pass, so that a new email si sent
+    # let the interval time pass, so that a new email is sent
     time.sleep(5)
     c = requests.get(server + "/run_analysis",
                      dict_param
@@ -870,3 +1016,213 @@ def test_email_callback_after_run_analysis_subprocess_mail_server(dispatcher_liv
     assert os.path.exists(email_history_folder_path)
     list_email_files = glob.glob(email_history_folder_path + '/email_*.email')
     assert len(list_email_files) == 1
+
+
+def test_email_very_long_request_url(dispatcher_long_living_fixture, dispatcher_local_mail_server):
+    # emails generally can not contain lines longer than 999 characters.
+    # different SMTP servers will deal with these differently: 
+    #  * some will respond with error, 
+    #  * some, apparently, automatically introduce new line 
+    # 
+    # The latter  may cause an issue if it is added in the middle of data, 
+    # e.g. in some random place in json 
+    # we need:
+    #  * to detect this and be clear we can not send these long lines. they are not often usable as URLs anyway
+    #  * compress long parameters, e.g. selected_catalog
+    #  * request by shortcut (job_d): but it is clear that it is not generally possible to derive parameters from job_id
+    #  * make this or some other kind of URL shortener
+
+    server = dispatcher_long_living_fixture
+    
+    DispatcherJobState.remove_scratch_folders()
+
+     # let's generate a valid token with high threshold
+    token_payload = {
+        **default_token_payload,
+        "tem": 0
+    }
+    encoded_token = jwt.encode(token_payload, secret_key, algorithm='HS256')
+    # set the time the request was initiated
+    time_request = time.time()
+
+    name_parameter_value = "01"*1000
+
+    c = requests.get(server + "/run_analysis",
+                     params=dict(
+                         query_status="new",
+                         query_type="Real",
+                         instrument="empty-async",
+                         product_type="numerical",
+                         string_like_name=name_parameter_value,
+                         token=encoded_token,
+                         time_request=time_request
+                     ))
+
+    logger.info("response from run_analysis: %s", json.dumps(c.json(), indent=4))
+
+    dispatcher_job_state = DispatcherJobState.from_run_analysis_response(c)    
+
+    jdata = c.json()
+    assert jdata['exit_status']['email_status'] == 'email sent'
+
+    dispatcher_job_state.assert_email("submitted")
+
+    email_data = dispatcher_job_state.load_emails()[0]
+
+    print(email_data)
+
+    short_url = (f"PRODUCTS_URL/dispatch-data/resolve-job-url?"
+                 f"job_id={dispatcher_job_state.job_id}&"
+                 f"session_id={dispatcher_job_state.session_id}&"
+                 f"token={encoded_token}"
+                 )
+                 
+
+    assert short_url in email_data
+
+    url = short_url.replace('PRODUCTS_URL/dispatch-data', server)
+
+    print("url", url)
+
+    c = requests.get(url, allow_redirects=False)
+
+    assert c.status_code == 302, json.dumps(c.json(), sort_keys=True, indent=4)
+
+    redirect_url = parse.urlparse(c.headers['Location'])
+    print(redirect_url)
+        
+    # TODO: complete this
+    # compressed = "z%3A" + base64.b64encode(zlib.compress(json.dumps(name_parameter_value).encode())).decode()
+    # assert compressed in email_data
+
+
+def test_email_parameters_html_conflicting(dispatcher_long_living_fixture, dispatcher_local_mail_server):
+    server = dispatcher_long_living_fixture
+    
+    DispatcherJobState.remove_scratch_folders()
+
+     # let's generate a valid token with high threshold
+    token_payload = {
+        **default_token_payload,
+        "tem": 0
+    }
+    encoded_token = jwt.encode(token_payload, secret_key, algorithm='HS256')
+    # set the time the request was initiated
+    time_request = time.time()
+
+    name_parameter_value = "< bla bla: this is not a tag > <"
+
+    c = requests.get(server + "/run_analysis",
+                     params=dict(
+                         query_status="new",
+                         query_type="Real",
+                         instrument="empty-async",
+                         product_type="numerical",
+                         string_like_name=name_parameter_value,
+                         token=encoded_token,
+                         time_request=time_request
+                     ))
+
+    logger.info("response from run_analysis: %s", json.dumps(c.json(), indent=4))
+
+    dispatcher_job_state = DispatcherJobState.from_run_analysis_response(c)    
+
+    jdata = c.json()
+    assert jdata['exit_status']['email_status'] == 'email sent'
+
+    dispatcher_job_state.assert_email("submitted")
+
+    email_data = dispatcher_job_state.load_emails()[0]
+
+    print(email_data)
+
+    assert name_parameter_value in email_data
+
+    from bs4 import BeautifulSoup
+    assert name_parameter_value in BeautifulSoup(email_data).get_text()
+
+@pytest.mark.parametrize('length', [3, 100])
+def test_email_very_long_unbreakable_string(length, dispatcher_long_living_fixture, dispatcher_local_mail_server):
+
+    server = dispatcher_long_living_fixture
+    
+    DispatcherJobState.remove_scratch_folders()
+
+     # let's generate a valid token with high threshold
+    token_payload = {
+        **default_token_payload,
+        "tem": 0
+    }
+    encoded_token = jwt.encode(token_payload, secret_key, algorithm='HS256')
+    # set the time the request was initiated
+    time_request = time.time()
+    
+
+    params = dict(
+            query_status="new",
+            query_type="Real",
+            instrument="empty-async",
+            product_type="numerical",
+            token=encoded_token,
+            time_request=time_request
+        )
+
+    # this kind of parameters never really happen, and we should be alerted
+    # we might as well send something in email, like failed case. but better let's make us look immediately
+    params['very_long_parameter_'*length] = "unset"
+
+    c = requests.get(server + "/run_analysis",
+                     params=params)
+
+    logger.info("response from run_analysis: %s", json.dumps(c.json(), indent=4))
+
+    dispatcher_job_state = DispatcherJobState.from_run_analysis_response(c)    
+
+    jdata = c.json()
+
+    if all([len(k) < 900 for k in params.keys()]):
+        assert jdata['exit_status']['email_status'] == 'email sent'
+    else:
+        assert jdata['exit_status']['email_status'] == 'sending email failed'
+
+
+
+
+def test_email_compress_request_url():    
+    from cdci_data_analysis.analysis.email_helper import compress_request_url_params
+
+    url = "http://localhost:8000/?" + urlencode(dict(
+        par_int=123,
+        par_str="01"*10000,
+    ))
+
+    compressed_url = compress_request_url_params(url, consider_args=['par_str'])
+
+    assert len(compressed_url) < 200
+    assert len(url) > 10000
+
+
+def test_wrap_api_code():
+    from cdci_data_analysis.analysis.email_helper import wrap_python_code
+
+    max_length=50
+
+    c = wrap_python_code("""
+a = 1
+
+def x():
+    pass
+
+bla = x()
+
+bla = "asdasdas adasda sdasdas dasdas asdasdas adasda sdasdas dasdas asdasdas adasda sdasdas dasdas"
+    """, max_length=max_length)
+
+    assert max([ len(l) for l in c.split("\n") ]) < max_length
+
+    my_globals = {}
+    exec(c, my_globals)
+
+    assert len(my_globals['bla']) > max_length
+    
+    

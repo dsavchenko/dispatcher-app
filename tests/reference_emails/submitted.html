@@ -2,25 +2,27 @@
 <html lang="en">
 
 <head>
-    <title>[ODA][submitted] dummy first requested at 2021-05-31 17:51:33 job_id: 2a8eb39e</title>
+    <title>[ODA][submitted] dummy first requested at 2021-06-09 18:20:28 job_id: 2a8eb39e</title>
 </head>
 
 <body>
 Dear User,<br>
 <br>
-you receive this message because at 2021-05-31 17:51:33 ( 0.0 seconds ago ) you submitted a request <br>
+you receive this message because at 2021-06-09 18:20:28 ( 0.1 seconds ago ) you submitted a request <br>
 for a dummy from the service provided by University of Geneva<br>
-available at the URL http://www.astro.unige.ch/cdci/astrooda_.<br>
+available at the URL PRODUCTS_URL.<br>
 <br>
 
 Once products will be ready, you will receive a new email.<br>
 
 <br>
-You can inspect the status of your job using the following <br>
-<a href="http://www.astro.unige.ch/cdci/astrooda_?query_status=new&query_type=Real&instrument=empty-async&product_type=dummy">url</a> or repeating the request 
-(either with frontend or with the python API query at the end of this message.).<br>
+You can inspect the status of your job using the following <a href="PRODUCTS_URL?query_status=new&query_type=Real&instrument=empty-async&product_type=dummy">url</a>.<br>
+ 
+Note that this url is permanent, and can be used to refer to the results as long as the service exists.<br>
+
+You can also retrieve the result by repeating the request (either with frontend or with the python API query at the end of this message.).<br>
 <br>
-In case you have questions or issues you can contact us at <a href="mailto:contact@odahub.io">this email</a>.<br>
+In case you have questions or issues you can contact us at <a href="mailto:contact@odahub.io">this email</a> or reply to the current message.<br>
 <br>
 Kind regards,<br>
 <br>
@@ -31,16 +33,21 @@ Python API code:<br>
 <br>
 <div style="background-color: lightgray; display: inline-block; padding: 5px;">
 from oda_api.api import DispatcherAPI<br>
-disp=DispatcherAPI(url='http://www.astro.unige.ch/cdci/astrooda_', instrument='mock')<br>
 <br>
-par_dict={<br>
-    "product_type": "Real",<br>
-    "instrument": "empty-async",<br>
-    "product": "dummy",<br>
-    "token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJtdG1AbXRtY28ubmV0IiwibmFtZSI6Im1tZWhhcmdhIiwicm9sZXMiOiJnZW5lcmFsIiwiZXhwIjoxNjIyNDgxMjg5fQ.dr1GlWync5vNNpVvG5c-VioCCcNm0-_Fq6KoX3pzVPY"<br>
+disp = DispatcherAPI(url=&#34;PRODUCTS_URL&#34;, instrument=&#34;mock&#34;)<br>
+<br>
+par_dict = {<br>
+    &#34;product_type&#34;: &#34;Real&#34;,<br>
+    &#34;instrument&#34;: &#34;empty-async&#34;,<br>
+    &#34;product&#34;: &#34;dummy&#34;,<br>
+    &#34;token&#34;: (<br>
+        &#34;eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJtdG1AbXRtY28ubmV0IiwibmFtZSI6Im1tZWhhcmdhIiwicm9sZX&#34;<br>
+        &#34;MiOiJnZW5lcmFsIiwiZXhwIjoxNjIzMjYwNjI0fQ.d7h8ndgfER8Gt208nkB8FQUizLfv9WzU8jBeCBLktFM&#34;<br>
+    ),<br>
 }<br>
 <br>
-data_collection = disp.get_product(**par_dict)
+data_collection = disp.get_product(**par_dict)<br>
+
 </div>
 <br>
 <br>
